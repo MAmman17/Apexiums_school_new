@@ -29,6 +29,13 @@ const {
     ownLeaveWhere,
     readReviewStatus
 } = require('./api/_lib/leave-requests');
+const {
+    deleteModuleData,
+    getModuleDataFromBody,
+    listDefaultModules,
+    readModuleData,
+    writeModuleData
+} = require('./api/_lib/module-store');
 const { startWhatsAppBirthdayScheduler } = require('./api/_lib/cronjob');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -1874,6 +1881,48 @@ app.post('/api/teacher-salaries', async (req, res) => {
         res.json({ success: true, salaries });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message || 'Salary payments could not be saved.' });
+    }
+});
+
+app.get('/api/modules', (_req, res) => {
+    res.json({
+        success: true,
+        modules: listDefaultModules()
+    });
+});
+
+app.get('/api/modules/:moduleKey', async (req, res) => {
+    if (!sequelize) return res.status(503).json({ success: false, message: 'Database offline' });
+
+    try {
+        res.json({ success: true, ...(await readModuleData(sequelize, req.params.moduleKey)) });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ success: false, message: err.message || 'Module data could not be loaded.' });
+    }
+});
+
+app.post('/api/modules/:moduleKey', async (req, res) => {
+    if (!sequelize) return res.status(503).json({ success: false, message: 'Database offline' });
+
+    try {
+        const updatedBy = req.user?.username || req.user?.role || req.headers['x-updated-by'] || '';
+        const record = await writeModuleData(sequelize, req.params.moduleKey, getModuleDataFromBody(req.body), updatedBy);
+        io.emit('module_data_update', record);
+        res.json({ success: true, ...record });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ success: false, message: err.message || 'Module data could not be saved.' });
+    }
+});
+
+app.delete('/api/modules/:moduleKey', async (req, res) => {
+    if (!sequelize) return res.status(503).json({ success: false, message: 'Database offline' });
+
+    try {
+        const record = await deleteModuleData(sequelize, req.params.moduleKey);
+        io.emit('module_data_update', record);
+        res.json({ success: true, ...record });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ success: false, message: err.message || 'Module data could not be deleted.' });
     }
 });
 
