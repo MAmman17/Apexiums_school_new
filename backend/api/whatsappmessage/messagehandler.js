@@ -82,7 +82,7 @@ async function sendWhatsAppMessage(student, message) {
         const url = `https://live-mt-server.wati.io/10166110/api/v1/sendSessionMessage/${to}`;
 
         const payload = {
-            messaging_product: "whatsapp",
+            messagingText: "message",
             to,
             type: "text",
             text: {

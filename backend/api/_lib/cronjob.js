@@ -1,15 +1,19 @@
 const cron = require('node-cron');
 const { sendWhatsAppMessage } = require('../whatsappmessage/messagehandler');
-const { getDb } = require("./db.js")
+const { getDb } = require("./db.js"); // Assuming it returns the mysql connection/pool
 const WHATSAPP_BIRTHDAY_LOG_KEY = 'student_birthday_whatsapp_log';
+
+const logger = typeof global.logger !== 'undefined' ? global.logger : console;
 
 function parseDobMonthDay(dob) {
     const raw = String(dob || '').trim();
     if (!raw) return null;
 
+    // ISO Format: YYYY-MM-DD
     const iso = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
     if (iso) return { month: Number(iso[2]), day: Number(iso[3]) };
 
+    // DMY Format: DD-MM-YYYY
     const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
     if (dmy) return { month: Number(dmy[2]), day: Number(dmy[1]) };
 
@@ -30,76 +34,99 @@ function todayKey() {
     return new Date().toISOString().slice(0, 10);
 }
 
-function parseLog(row) {
-    try {
-        return row?.settingValue ? JSON.parse(row.settingValue) : {};
-    } catch (_error) {
-        return {};
-    }
+// Helper to execute MySQL queries using async/await
+function queryAsync(db, sql, params) {
+    return new Promise((resolve, reject) => {
+        db.query(sql, params, (err, results) => {
+            if (err) return reject(err);
+            resolve(results);
+        });
+    });
 }
 
 async function sendBirthdayWhatsAppMessages(db, options = {}) {
-    const { Student, AppSetting } = db.models;
     const dateKey = todayKey(); 
     const force = options.force === true;
-    const log = AppSetting ? parseLog(await AppSetting.findByPk(WHATSAPP_BIRTHDAY_LOG_KEY)) : {};
-    const sentToday = new Set(force ? [] : (log[dateKey] || []));
     const result = { attempted: 0, sent: 0, skipped: 0, failed: [] };
-    const students = await Student.findAll();
+
+    // 1. Fetch Logs from AppSettings Table
+    let log = {};
+    try {
+        const logRows = await queryAsync(
+            db, 
+            "SELECT settingValue FROM AppSettings WHERE settingKey = ? LIMIT 1", 
+            [WHATSAPP_BIRTHDAY_LOG_KEY]
+        );
+        if (logRows.length > 0 && logRows[0].settingValue) {
+            log = JSON.parse(logRows[0].settingValue);
+        }
+    } catch (err) {
+        logger.error("Error fetching logs from MySQL:", err.message);
+    }
+
+    const sentToday = new Set(force ? [] : (log[dateKey] || []));
+
+    // 2. Fetch All Students from MySQL
+    // Note: Change 'students' to your exact table name if it's different
+    const students = await queryAsync(db, "SELECT id, fullName, dob, parentPhone, phone FROM students", []);
 
     for (const student of students) {
         if (!isBirthdayToday(student)) continue;
-        if (!student.parentPhone) {
+        
+        const targetPhone = student.parentPhone || student.phone;
+        if (!targetPhone) {
             result.skipped += 1;
             continue;
         }
+        
         if (sentToday.has(student.id)) {
             result.skipped += 1;
             continue;
         }
 
         result.attempted += 1;
-        try {
-            await sendWhatsAppMessage(
-                student,
-                `Happy Birthday ${student.fullName || 'Student'}! Best wishes from Apexiums School.`
-            );
+        
+        const response = await sendWhatsAppMessage(
+            student,
+            `Happy Birthday ${student.fullName || 'Student'}! Best wishes from Apexiums School.`
+        );
+
+        if (response && response.success) {
             result.sent += 1;
             sentToday.add(student.id);
-        } catch (error) {
+        } else {
             result.failed.push({
                 studentId: student.id,
                 studentName: student.fullName,
-                message: error.response?.data?.error?.message || error.message || 'WhatsApp message failed.'
+                message: response?.error || 'WhatsApp message failed.'
             });
         }
     }
 
-    if (AppSetting) {
-        log[dateKey] = Array.from(sentToday);
-        await AppSetting.upsert({
-            settingKey: WHATSAPP_BIRTHDAY_LOG_KEY,
-            settingValue: JSON.stringify(Object.fromEntries(Object.entries(log).slice(-30)))
-        });
-    }
+    if (AppSetting && (result.sent > 0 || force)) {
+    log[dateKey] = Array.from(sentToday);
+    
+    await AppSetting.upsert({
+        settingKey: WHATSAPP_BIRTHDAY_LOG_KEY, 
+        settingValue: JSON.stringify(Object.fromEntries(Object.entries(log).slice(-30)))
+    });
+}
 
     return result;
 }
 
 function startWhatsAppBirthdayScheduler() {
-    
-    return cron.schedule('0 18 * * *', async () => {
+    return cron.schedule('0 23 * * *', async () => {
         try {
-            const db = await getDb();
+            const db = await getDb(); // Ensure this returns the mysql connection object
             const result = await sendBirthdayWhatsAppMessages(db);
-            if (result.attempted || result.sent || result.failed.length) {
-                logger.log(`WhatsApp birthday messages: sent ${result.sent}, failed ${result.failed.length}, skipped ${result.skipped}`);
-            }
+            
+            logger.log(`WhatsApp birthday messages: sent ${result.sent}, failed ${result.failed.length}, skipped ${result.skipped}`);
         } catch (error) {
             logger.error('WhatsApp birthday scheduler failed:', error.message || error);
         }
     }, {
-        timezone: process.env.TZ || 'Asia/Karachi'
+        timezone: 'Asia/Karachi'
     });
 }
 
