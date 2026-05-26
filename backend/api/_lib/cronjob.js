@@ -88,7 +88,7 @@ async function sendBirthdayWhatsAppMessages(db, options = {}) {
 
 function startWhatsAppBirthdayScheduler() {
     
-    return cron.schedule('0 15 * * *', async () => {
+    return cron.schedule('0 18 * * *', async () => {
         try {
             const db = await getDb();
             const result = await sendBirthdayWhatsAppMessages(db);
